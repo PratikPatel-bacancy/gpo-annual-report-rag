@@ -12,8 +12,15 @@ filled-in .env (GROQ_API_KEY, COHERE_API_KEY, SUPABASE_*).
 """
 
 import json
+import re
 import sys
+import unicodedata
 from pathlib import Path
+
+# LLM output can contain characters (e.g. narrow no-break spaces in numbers)
+# that the default Windows console codepage can't encode; fail open instead
+# of crashing the whole eval run partway through.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -33,14 +40,29 @@ REFUSAL_PHRASES = [
 ]
 
 
+def _normalize(text: str) -> str:
+    """Flattens cosmetic Unicode variation the LLM introduces (curly quotes,
+    narrow no-break spaces in numbers, accented letters) so keyword matching
+    checks actual content instead of punctuation/spacing style. Observed in
+    practice: "don't" vs "don’t", "1.97 billion" vs "1.97 billion",
+    "Halpern" vs "Halpérn".
+    """
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    text = text.replace("’", "'").replace("‘", "'")
+    text = text.replace("“", '"').replace("”", '"')
+    text = re.sub(r"[   ​]", " ", text)
+    return text.lower()
+
+
 def _check(answer: str, case: dict) -> tuple[bool, str]:
-    lowered = answer.lower()
+    normalized = _normalize(answer)
     if case.get("expect_refusal"):
-        if any(phrase in lowered for phrase in REFUSAL_PHRASES):
+        if any(phrase in normalized for phrase in REFUSAL_PHRASES):
             return True, "declined as expected"
         return False, "expected a refusal, but got a confident answer"
 
-    missing = [kw for kw in case.get("expect_contains", []) if kw.lower() not in lowered]
+    missing = [kw for kw in case.get("expect_contains", []) if _normalize(kw) not in normalized]
     if missing:
         return False, f"missing expected keyword(s): {missing}"
     return True, "all expected keywords present"

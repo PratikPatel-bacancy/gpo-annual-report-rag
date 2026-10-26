@@ -58,13 +58,18 @@ def _split_long_text(text: str, max_chars: int, overlap: int) -> list[str]:
     return parts
 
 
-def _locate_sections(pages: list[tuple[int, str]]) -> list[tuple[str, int]]:
-    """Returns [(heading, start_page), ...] in document order.
+def _locate_sections(pages: list[tuple[int, str]]) -> tuple[list[tuple[str, int]], set[int]]:
+    """Returns ([(heading, start_page), ...], toc_pages).
 
     Pages containing "TABLE OF CONTENTS" are skipped when searching, since
     the ToC repeats every heading's text immediately followed by a dot
     leader and page number -- without that exclusion, every heading would
     "start" on the ToC page instead of where its section actually begins.
+    The caller also excludes toc_pages from every section's actual content:
+    a page that's just a list of section titles carries little topical
+    meaning of its own and, left in, can dilute whichever chunk absorbs it
+    (this was exactly what buried the "Transmittal Letter" chunk's embedding
+    under generic ToC text until this exclusion was added).
     """
     normalized = [(num, _normalize(text)) for num, text in pages]
     toc_pages = {num for num, norm in normalized if "TABLE OF CONTENTS" in norm.upper()}
@@ -78,7 +83,7 @@ def _locate_sections(pages: list[tuple[int, str]]) -> list[tuple[str, int]]:
                 located.append((heading, num))
                 break
     located.sort(key=lambda h: h[1])
-    return located
+    return located, toc_pages
 
 
 def chunk_pages(pages: list[tuple[int, str]], doc_title: str) -> list[Chunk]:
@@ -95,7 +100,7 @@ def chunk_pages(pages: list[tuple[int, str]], doc_title: str) -> list[Chunk]:
     if not pages:
         return []
 
-    sections = _locate_sections(pages)
+    sections, toc_pages = _locate_sections(pages)
     if not sections:
         # Fallback if heading detection finds nothing at all (e.g. a very
         # differently-formatted document): treat the whole PDF as one
@@ -106,12 +111,20 @@ def chunk_pages(pages: list[tuple[int, str]], doc_title: str) -> list[Chunk]:
     page_numbers = sorted(page_text)
     last_page = page_numbers[-1]
 
+    # Anything before the first recognized heading (e.g. a cover page and
+    # transmittal letter preceding "A Message from the Director") would
+    # otherwise be silently dropped -- it contains real, citable content
+    # (who signed the report, when it was submitted), just not under any
+    # heading this document itself defines.
+    if sections[0][1] > page_numbers[0]:
+        sections = [("Transmittal Letter", page_numbers[0])] + sections
+
     chunks: list[Chunk] = []
     for idx, (heading, start_page) in enumerate(sections):
         end_page = sections[idx + 1][1] - 1 if idx + 1 < len(sections) else last_page
         end_page = max(end_page, start_page)
 
-        nums_in_range = [n for n in page_numbers if start_page <= n <= end_page]
+        nums_in_range = [n for n in page_numbers if start_page <= n <= end_page and n not in toc_pages]
         marked = "".join(f"{_PAGE_MARK_OPEN}{n}{_PAGE_MARK_CLOSE}{page_text[n]}" for n in nums_in_range)
 
         for piece in _split_long_text(marked, MAX_CHUNK_CHARS, OVERLAP_CHARS):

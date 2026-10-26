@@ -14,8 +14,8 @@ class Settings(BaseSettings):
 
     supabase_url: str
     supabase_service_role_key: str
-    supabase_table: str = "documents"
-    match_function: str = "match_documents"
+    supabase_table: str = "gpo_documents"
+    match_function: str = "match_gpo_documents"
 
     source_pdf_path: str = str(
         BACKEND_ROOT / "data" / "source_documents" / "gpo_annual_report_fy2025.pdf"

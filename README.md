@@ -60,7 +60,7 @@ you'd like, or a fresh Supabase project to keep this corpus separate:
    - **Database → Extensions** → enable `vector`
    - **SQL Editor** → run:
      ```sql
-     create table documents (
+     create table gpo_documents (
        id bigserial primary key,
        content text,
        source text,
@@ -70,7 +70,7 @@ you'd like, or a fresh Supabase project to keep this corpus separate:
        embedding vector(1024)
      );
 
-     create or replace function match_documents (
+     create or replace function match_gpo_documents (
        query_embedding vector(1024),
        match_count int
      )
@@ -80,14 +80,19 @@ you'd like, or a fresh Supabase project to keep this corpus separate:
      )
      language sql stable
      as $$
-       select documents.id, documents.content, documents.source, documents.heading,
-              documents.page_start, documents.page_end,
-              1 - (documents.embedding <=> query_embedding) as similarity
-       from documents
-       order by documents.embedding <=> query_embedding
+       select gpo_documents.id, gpo_documents.content, gpo_documents.source, gpo_documents.heading,
+              gpo_documents.page_start, gpo_documents.page_end,
+              1 - (gpo_documents.embedding <=> query_embedding) as similarity
+       from gpo_documents
+       order by gpo_documents.embedding <=> query_embedding
        limit match_count;
      $$;
      ```
+
+   > **If reusing the same Supabase project as `cricket-chatbot`**: this creates a separate
+   > `gpo_documents` table/function, distinct from cricket-chatbot's `documents` table. Don't
+   > rename it to `documents` — ingestion here deletes everything in its target table before
+   > re-indexing, and pointing it at cricket-chatbot's table would wipe that project's data.
    - **Project Settings → API** → copy the **Project URL** and the **`service_role`** key
 
 ### 2. Backend

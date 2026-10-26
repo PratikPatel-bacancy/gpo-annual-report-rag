@@ -1,4 +1,6 @@
+import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -10,6 +12,23 @@ from app.services.vectorstore import query as query_vectorstore
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 MAX_HISTORY_MESSAGES = 20
+
+# Groq's free tier has tight per-minute rate limits -- a back-to-back batch
+# of questions (e.g. running the eval suite) can hit a 429 well within
+# normal use. Retry with backoff (honoring Retry-After when given) instead
+# of surfacing a transient rate limit as a hard failure.
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2.0
+
+
+def _retry_wait_seconds(response: httpx.Response, attempt: int) -> float:
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return float(retry_after)
+        except ValueError:
+            pass
+    return RETRY_BACKOFF_SECONDS * (2**attempt)
 
 SYSTEM_PROMPT = f"""You are an assistant that answers questions about the {{document_title}}.
 
@@ -86,24 +105,30 @@ async def answer_stream(question: str, history: list[dict] | None = None) -> Asy
     messages = _build_messages(question, sources, history)
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        async with client.stream(
-            "POST",
-            GROQ_CHAT_URL,
-            headers=_groq_headers(),
-            json={"model": settings.groq_model, "messages": messages, "stream": True},
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line or not line.startswith("data: "):
+        for attempt in range(MAX_RETRIES + 1):
+            async with client.stream(
+                "POST",
+                GROQ_CHAT_URL,
+                headers=_groq_headers(),
+                json={"model": settings.groq_model, "messages": messages, "stream": True},
+            ) as response:
+                if response.status_code in (429, 503) and attempt < MAX_RETRIES:
+                    await response.aclose()
+                    await asyncio.sleep(_retry_wait_seconds(response, attempt))
                     continue
-                payload = line[len("data: ") :]
-                if payload == "[DONE]":
-                    break
-                chunk = json.loads(payload)
-                delta = chunk["choices"][0].get("delta", {})
-                content = delta.get("content", "")
-                if content:
-                    yield {"type": "token", "text": content}
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    payload = line[len("data: ") :]
+                    if payload == "[DONE]":
+                        break
+                    chunk = json.loads(payload)
+                    delta = chunk["choices"][0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        yield {"type": "token", "text": content}
+            break
 
     yield {"type": "sources", "sources": sources}
 
@@ -112,12 +137,18 @@ def answer_once(question: str, history: list[dict] | None = None) -> dict:
     sources = retrieve(question)
     messages = _build_messages(question, sources, history)
 
-    response = httpx.post(
-        GROQ_CHAT_URL,
-        headers=_groq_headers(),
-        json={"model": settings.groq_model, "messages": messages, "stream": False},
-        timeout=60.0,
-    )
-    response.raise_for_status()
+    for attempt in range(MAX_RETRIES + 1):
+        response = httpx.post(
+            GROQ_CHAT_URL,
+            headers=_groq_headers(),
+            json={"model": settings.groq_model, "messages": messages, "stream": False},
+            timeout=60.0,
+        )
+        if response.status_code in (429, 503) and attempt < MAX_RETRIES:
+            time.sleep(_retry_wait_seconds(response, attempt))
+            continue
+        response.raise_for_status()
+        break
+
     answer_text = response.json()["choices"][0]["message"]["content"]
     return {"answer": answer_text, "sources": sources}
